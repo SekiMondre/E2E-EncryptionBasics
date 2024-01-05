@@ -4,16 +4,26 @@ import CryptoKit
 typealias PrivateKey = Curve25519.KeyAgreement.PrivateKey
 typealias PublicKey = Curve25519.KeyAgreement.PublicKey
 
-enum Cypher {
+extension Data {
     
-    static func encrypt(_ data: Data, with symmetricKey: SymmetricKey) throws -> Data {
-        let sealedBox = try ChaChaPoly.seal(data, using: symmetricKey)
-        return sealedBox.combined
+    static func random(count: Int = 32) -> Data {
+        var buffer = [UInt8](repeating: 0, count: count)
+        let status = SecRandomCopyBytes(kSecRandomDefault, count, &buffer)
+        guard status == errSecSuccess else {
+            fatalError("Failure generating random bytes with size \(count).")
+        }
+        return Data(buffer)
     }
     
-    static func decrypt(_ ciphertext: Data, with symmetricKey: SymmetricKey) throws -> Data {
-        let sealedBox = try ChaChaPoly.SealedBox(combined: ciphertext)
-        return try ChaChaPoly.open(sealedBox, using: symmetricKey)
+    var hexString: String {
+        self.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+extension SymmetricKey {
+
+    var hexString: String {
+        withUnsafeBytes { Data($0) }.hexString
     }
 }
 
@@ -21,14 +31,27 @@ struct Payload: Codable {
     let message: String
 }
 
+struct ErrorMessage: Error {
+    let message: String
+    
+    init(_ message: String) {
+        self.message = message
+    }
+}
+
 class Peer {
+    
+    let name: String
     
     private let privateKey: PrivateKey
     
     private var symmetricKey: SymmetricKey?
     
-    init() {
+    init(name: String) {
+        self.name = name
         self.privateKey = PrivateKey()
+        print("\(name) private key: \(privateKey.rawRepresentation.hexString)")
+        print("\(name) public key: \(privateKey.publicKey.rawRepresentation.hexString)")
     }
     
     var publicKey: PublicKey {
@@ -36,26 +59,30 @@ class Peer {
     }
     
     func deriveSymmetricKey(with publicKey: PublicKey) throws {
-        let salt = "salty".data(using: .utf8)!
         let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: publicKey)
-        self.symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt, sharedInfo: Data(), outputByteCount: 32)
+        let sharedKey = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data(),
+            sharedInfo: Data(),
+            outputByteCount: 32)
+        print("\n\(name) derived the symmetric key:\n\(sharedKey.hexString)")
+        self.symmetricKey = sharedKey
     }
     
-    func encode<T: Codable>(_ payload: T) throws -> Data {
+    func encode<T: Codable>(_ payload: T, using cypher: Cypher) throws -> Data {
         guard let symmetricKey else {
-            fatalError()
+            throw ErrorMessage("No symmetric key found.")
         }
         let payloadData = try JSONEncoder().encode(payload)
-        let cyphertext = try Cypher.encrypt(payloadData, with: symmetricKey)
-        return cyphertext
+        return try cypher.encrypt(payloadData, with: symmetricKey)
     }
     
-    func receive(_ cyphertext: Data) throws {
+    func receive(_ cyphertext: Data, using cypher: Cypher) throws {
         guard let symmetricKey else {
-            fatalError()
+            throw ErrorMessage("No symmetric key found.")
         }
-        let payloadData = try Cypher.decrypt(cyphertext, with: symmetricKey)
+        let payloadData = try cypher.decrypt(cyphertext, with: symmetricKey)
         let payload = try JSONDecoder().decode(Payload.self, from: payloadData)
-        print("Received message: \(payload.message)")
+        print("\(name) decoded message: \(payload.message)")
     }
 }
